@@ -12,9 +12,11 @@ BYBIT  = "https://api.bybit.com"
 def http_get(url, params=None, timeout=10):
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+    headers = {'User-Agent': 'Mozilla/5.0 (compatible; RenderBot/1.0; +https://render.com)'}
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
-
+        
 def fmt(x, d=2):
     try: return f"{x:,.{d}f}".replace(",", " ")
     except: return str(x)
