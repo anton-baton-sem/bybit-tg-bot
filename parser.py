@@ -1,9 +1,9 @@
-# parser.py — агрегирует snapshots/*.json в analytics/daily_summary.csv и пушит в GitHub
-# ENV: GITHUB_TOKEN, GITHUB_REPO, GITHUB_PATH (путь к папке со снапшотами, напр. "snapshots/")
+# parser.py — агрегирует snapshots/*.json в analytics/daily_summary.csv
+# и генерирует analytics/README.md с таблицей ссылок и метрик.
+# ENV: GITHUB_TOKEN, GITHUB_REPO, GITHUB_PATH (напр. "snapshots/")
 
 import os, json, base64, csv, io, urllib.request, urllib.parse
 from collections import defaultdict
-from datetime import datetime
 
 GITHUB_API = "https://api.github.com"
 
@@ -24,18 +24,15 @@ def gh_request(url, token, method="GET", payload=None):
 def list_snapshot_files(repo, path, token):
     url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
     items = gh_request(url, token)
-    files = [it for it in items if it.get("type")=="file" and it["name"].endswith(".json")]
-    return files
+    return [it for it in items if it.get("type")=="file" and it["name"].endswith(".json")]
 
 def get_file_json(repo, path, token):
     url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
     item = gh_request(url, token)
-    content_b64 = item.get("content","")
-    raw = base64.b64decode(content_b64).decode()
+    raw = base64.b64decode(item.get("content","")).decode()
     return json.loads(raw)
 
 def upload_file(repo, path, token, content_str, message="update file"):
-    # получим sha, если файл есть
     get_url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
     sha = None
     try:
@@ -43,7 +40,6 @@ def upload_file(repo, path, token, content_str, message="update file"):
         sha = res.get("sha")
     except Exception:
         sha = None
-    put_url = get_url
     payload = {
         "message": message,
         "content": base64.b64encode(content_str.encode()).decode(),
@@ -51,16 +47,19 @@ def upload_file(repo, path, token, content_str, message="update file"):
     }
     if sha:
         payload["sha"] = sha
-    return gh_request(put_url, token, method="PUT", payload=payload)
+    return gh_request(get_url, token, method="PUT", payload=payload)
 
-def safe_get(d, path, default=""):
+def safe(d, path, default=""):
     cur = d
     try:
-        for p in path:
-            cur = cur[p]
+        for p in path: cur = cur[p]
         return cur if cur is not None else default
-    except Exception:
-        return default
+    except: return default
+
+def pct(a, b):
+    try:
+        return (float(b)/float(a)-1.0)*100.0
+    except: return ""
 
 def main():
     token = os.environ["GITHUB_TOKEN"]
@@ -68,35 +67,38 @@ def main():
     snap_path = os.environ.get("GITHUB_PATH","snapshots/").rstrip("/") + "/"
 
     files = list_snapshot_files(repo, snap_path, token)
-    # группируем по дате
+
     by_date = defaultdict(dict)
     for it in files:
         name = it["name"]  # YYYY-MM-DD_mode.json
-        if "_" not in name: 
-            continue
+        if "_" not in name: continue
         date_part, rest = name.split("_", 1)
         mode = "forecast" if "forecast" in rest else ("review" if "review" in rest else None)
-        if not mode:
-            continue
+        if not mode: continue
         data = get_file_json(repo, f"{snap_path}{name}", token)
         by_date[date_part][mode] = data
 
-    # сформируем CSV
+    # ---- CSV ----
     headers = [
         "date",
         "eth_last_forecast","eth_last_review","eth_change_pct",
         "btc_last_forecast","btc_last_review","btc_change_pct",
         "funding_eth_forecast","funding_eth_review",
         "oi_eth_forecast","oi_eth_review",
-        "atr_1d_forecast","vwap_review",
-        "orderbook_imbalance_forecast",
+        "atr_1d_forecast","vwap_review","orderbook_imbalance_forecast",
         "support_lvl1","support_lvl2","resist_lvl1","resist_lvl2"
     ]
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(headers)
+    out_csv = io.StringIO()
+    w = csv.writer(out_csv); w.writerow(headers)
 
-    def num(x):
+    # ---- Markdown README ----
+    rows_md = []
+    rows_md.append("# Ежедневная сводка снапшотов\n")
+    rows_md.append("> Автоматически сгенерировано парсером из папки `snapshots/`.\n\n")
+    rows_md.append("| Дата | Forecast | Review | ETH Δ% | BTC Δ% | Funding ETH f/r | OI ETH f/r | ATR(1D) | VWAP (review) | Levels |\n")
+    rows_md.append("|---|---|---|---:|---:|---:|---:|---:|---:|---|\n")
+
+    def n(x):
         try: return float(x)
         except: return ""
 
@@ -104,44 +106,46 @@ def main():
         f = by_date[date_key].get("forecast", {})
         r = by_date[date_key].get("review",   {})
 
-        eth_f = safe_get(f, ["eth_spot","last"], "")
-        eth_r = safe_get(r, ["eth_spot","last"], "")
-        btc_f = safe_get(f, ["btc_spot","last"], "")
-        btc_r = safe_get(r, ["btc_spot","last"], "")
-
-        def pct(a,b):
-            try:
-                if a=="" or b=="":
-                    return ""
-                return (float(b)/float(a)-1.0)*100.0
-            except:
-                return ""
+        eth_f = safe(f, ["eth_spot","last"], ""); eth_r = safe(r, ["eth_spot","last"], "")
+        btc_f = safe(f, ["btc_spot","last"], ""); btc_r = safe(r, ["btc_spot","last"], "")
+        d_eth = pct(eth_f, eth_r); d_btc = pct(btc_f, btc_r)
 
         row = [
             date_key,
-            num(eth_f), num(eth_r), pct(eth_f, eth_r),
-            num(btc_f), num(btc_r), pct(btc_f, btc_r),
-            num(safe_get(f, ["derivs","funding_eth_pct"], "")),
-            num(safe_get(r, ["derivs","funding_eth_pct"], "")),
-            num(safe_get(f, ["derivs","oi_eth"], "")),
-            num(safe_get(r, ["derivs","oi_eth"], "")),
-            num(safe_get(f, ["calc","atr_1d"], "")),
-            num(safe_get(r, ["calc","vwap_today"], "")),
-            num(safe_get(f, ["calc","orderbook_imbalance_pct"], "")),
-            num(safe_get(f, ["levels","support",0], "")),
-            num(safe_get(f, ["levels","support",1], "")),
-            num(safe_get(f, ["levels","resistance",0], "")),
-            num(safe_get(f, ["levels","resistance",1], "")),
+            n(eth_f), n(eth_r), d_eth,
+            n(btc_f), n(btc_r), d_btc,
+            n(safe(f, ["derivs","funding_eth_pct"], "")),
+            n(safe(r, ["derivs","funding_eth_pct"], "")),
+            n(safe(f, ["derivs","oi_eth"], "")),
+            n(safe(r, ["derivs","oi_eth"], "")),
+            n(safe(f, ["calc","atr_1d"], "")),
+            n(safe(r, ["calc","vwap_today"], "")),
+            n(safe(f, ["calc","orderbook_imbalance_pct"], "")),
+            n(safe(f, ["levels","support",0], "")),
+            n(safe(f, ["levels","support",1], "")),
+            n(safe(f, ["levels","resistance",0], "")),
+            n(safe(f, ["levels","resistance",1], "")),
         ]
-        writer.writerow(row)
+        w.writerow(row)
 
-    csv_str = output.getvalue()
-    output.close()
+        # Markdown-строка
+        link_f = f"[forecast]({snap_path}{date_key}_forecast.json)"
+        link_r = f"[review]({snap_path}{date_key}_review.json)" if "review" in by_date[date_key] else "—"
+        levels = f"S: {safe(f,['levels','support',0],'')}/{safe(f,['levels','support',1],'')} • R: {safe(f,['levels','resistance',0],'')}/{safe(f,['levels','resistance',1],'')}"
+        rows_md.append(
+            f"| {date_key} | {link_f} | {link_r} | "
+            f"{'' if d_eth=='' else f'{d_eth:.2f}%'} | {'' if d_btc=='' else f'{d_btc:.2f}%'} | "
+            f"{safe(f,['derivs','funding_eth_pct'],'')} / {safe(r,['derivs','funding_eth_pct'],'')} | "
+            f"{safe(f,['derivs','oi_eth'],'')} / {safe(r,['derivs','oi_eth'],'')} | "
+            f"{safe(f,['calc','atr_1d'],'')} | {safe(r,['calc','vwap_today'],'')} | {levels} |\n"
+        )
 
-    # заливаем в репозиторий
-    out_path = "analytics/daily_summary.csv"
-    upload_file(repo, out_path, token, csv_str, "build analytics/daily_summary.csv")
-    print("OK: analytics/daily_summary.csv updated")
+    csv_str = out_csv.getvalue(); out_csv.close()
+    md_str  = "".join(rows_md)
+
+    upload_file(repo, "analytics/daily_summary.csv", token, csv_str, "build analytics/daily_summary.csv")
+    upload_file(repo, "analytics/README.md",       token, md_str,  "build analytics/README.md")
+    print("OK: analytics CSV & README updated")
 
 if __name__ == "__main__":
     main()
