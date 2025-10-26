@@ -83,6 +83,197 @@ def get_orderbook_imbalance(symbol, depth=50):
     sa = sum(float(p[1]) for p in asks) if asks else 0.0
     return (sb-sa)/(sb+sa)*100.0 if (sb+sa)>0 else 0.0
 
+# ===================== ADD: TA helpers (без внешних библиотек) =====================
+def ema(series, period):
+    if not series or len(series) < period:
+        return None
+    k = 2 / (period + 1)
+    e = series[0]
+    for x in series[1:]:
+        e = x * k + e * (1 - k)
+    return e
+
+def rsi_wilder(closes, period=14):
+    if not closes or len(closes) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, period + 1):
+        ch = closes[i] - closes[i - 1]
+        gains.append(max(ch, 0.0))
+        losses.append(max(-ch, 0.0))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    for i in range(period + 1, len(closes)):
+        ch = closes[i] - closes[i - 1]
+        gain = max(ch, 0.0)
+        loss = max(-ch, 0.0)
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+# ===================== ADD: Bybit доп. источники =====================
+def get_spot_kline_closes(symbol, interval="60", limit=300):
+    j = http_get(f"{BYBIT}/v5/market/kline",
+                 {"category": "spot", "symbol": symbol, "interval": interval, "limit": limit})
+    rows = j.get("result", {}).get("list", []) or []
+    # Bybit отдаёт в порядке от нового к старому → разворачиваем
+    rows = list(reversed(rows))
+    closes = [float(r[4]) for r in rows]
+    highs  = [float(r[2]) for r in rows]
+    lows   = [float(r[3]) for r in rows]
+    return closes, highs, lows
+
+def get_linear_oi(symbol):
+    try:
+        j = http_get(f"{BYBIT}/v5/market/open-interest",
+                     {"category": "linear", "symbol": symbol, "interval": "1h", "limit": "1"})
+        lst = j.get("result", {}).get("list", []) or []
+        return float(lst[-1].get("openInterest")) if lst else None
+    except Exception:
+        return None
+
+def get_linear_oi_change_24h_pct(symbol):
+    try:
+        j = http_get(f"{BYBIT}/v5/market/open-interest",
+                     {"category": "linear", "symbol": symbol, "interval": "1h", "limit": "24"})
+        lst = j.get("result", {}).get("list", []) or []
+        if len(lst) < 2:
+            return None
+        first = float(lst[0].get("openInterest", "nan"))
+        last  = float(lst[-1].get("openInterest", "nan"))
+        if not (first > 0 and (first == first) and (last == last)):
+            return None
+        return (last - first) / first * 100.0
+    except Exception:
+        return None
+
+def get_recent_trades_ratio(symbol, limit=1000):
+    # отношение объёма маркет-покупок к маркет-продажам за последние сделки
+    try:
+        j = http_get(f"{BYBIT}/v5/market/recent-trade",
+                     {"category": "linear", "symbol": symbol, "limit": str(limit)})
+        trades = j.get("result", {}).get("list", []) or []
+        buy_vol = sell_vol = 0.0
+        for t in trades:
+            side = (t.get("side") or "").lower()  # "Buy"/"Sell"
+            qty = float(t.get("qty", "0"))
+            if side == "buy":
+                buy_vol += qty
+            elif side == "sell":
+                sell_vol += qty
+        if buy_vol + sell_vol == 0:
+            return None
+        return buy_vol / max(sell_vol, 1e-9)
+    except Exception:
+        return None
+
+def get_futures_volume_24h(symbol):
+    try:
+        j = http_get(f"{BYBIT}/v5/market/tickers",
+                     {"category": "linear", "symbol": symbol})
+        it = (j.get("result", {}) or {}).get("list", []) or []
+        return float(it[0].get("turnover24h", "nan")) if it else None
+    except Exception:
+        return None
+
+def get_liquidations_24h_usd(symbol):
+    # Не у всех аккаунтов/регионов эндпоинт доступен одинаково — суммируем грубо.
+    try:
+        j = http_get(f"{BYBIT}/v5/market/liquidation",
+                     {"category": "linear", "symbol": symbol, "limit": "200"})
+        lst = j.get("result", {}).get("list", []) or []
+        total = 0.0
+        for x in lst:
+            qty = float(x.get("qty", "0"))
+            price = float(x.get("price", "0"))
+            total += qty * price
+        return total if total > 0 else None
+    except Exception:
+        return None
+
+# ===================== ADD: расширение snapshot в main() =====================
+# ВСТАВЬ этот блок внутри main(), ПОСЛЕ того как у тебя уже есть:
+#  - eth = get_spot_ticker("ETHUSDT")
+#  - btc = get_spot_ticker("BTCUSDT")
+#  - snapshot = {...}  (твой базовый словарь с calc/derivs/levels)
+
+# --- TA по H1/H4 ---
+try:
+    cl1, hi1, lo1 = get_spot_kline_closes("ETHUSDT", interval="60", limit=300)  # H1 клоузы
+except Exception:
+    cl1, hi1, lo1 = [], [], []
+
+rsi_1h = rsi_wilder(cl1, 14) if cl1 else None
+# H4 сделаем даунсэмплом H1 (каждая 4-я свеча)
+cl4 = cl1[::4] if cl1 else []
+rsi_4h = rsi_wilder(cl4, 14) if cl4 and len(cl4) >= 15 else None
+
+ema_50_1h  = ema(cl1[-200:], 50)  if cl1 and len(cl1) >= 50  else None
+ema_200_1h = ema(cl1[-400:], 200) if cl1 and len(cl1) >= 200 else None
+if ema_50_1h is not None and ema_200_1h is not None:
+    ema_cross = "bullish" if ema_50_1h > ema_200_1h else ("bearish" if ema_50_1h < ema_200_1h else "flat")
+else:
+    ema_cross = None
+
+# --- Деривативы / объёмы ---
+oi_eth = get_linear_oi("ETHUSDT")
+oi_btc = get_linear_oi("BTCUSDT")
+oi_change_24h_pct = get_linear_oi_change_24h_pct("ETHUSDT")
+taker_ratio = get_recent_trades_ratio("ETHUSDT", limit=1000)
+fut_vol_24h = get_futures_volume_24h("ETHUSDT")
+liq_24h_usd = get_liquidations_24h_usd("ETHUSDT")
+
+# --- Диапазон / сессия ---
+try:
+    hi24 = float(snapshot["eth_spot"].get("high24h")) if snapshot.get("eth_spot") else None
+    lo24 = float(snapshot["eth_spot"].get("low24h"))  if snapshot.get("eth_spot") else None
+    range_mid = ((hi24 + lo24) / 2.0) if (hi24 is not None and lo24 is not None) else None
+except Exception:
+    range_mid = None
+
+# последние ~6 H1-часов как "сессионные" экстремумы
+try:
+    session_high = max(hi1[-6:]) if hi1 else None
+    session_low  = min(lo1[-6:]) if lo1 else None
+    session_hl = [session_high, session_low] if (session_high is not None and session_low is not None) else None
+except Exception:
+    session_hl = None
+
+# --- Обновляем snapshot новыми полями ---
+snapshot.setdefault("calc", {}).update({
+    "rsi_1h": rsi_1h,
+    "rsi_4h": rsi_4h,
+    "ema_50_1h": ema_50_1h,
+    "ema_200_1h": ema_200_1h,
+    "ema_cross": ema_cross
+})
+
+snapshot.setdefault("derivs", {}).update({
+    "oi_eth": oi_eth if oi_eth is not None else snapshot["derivs"].get("oi_eth"),
+    "oi_btc": oi_btc if oi_btc is not None else snapshot["derivs"].get("oi_btc"),
+    "oi_change_24h_pct": oi_change_24h_pct,
+    "taker_buy_sell_ratio": taker_ratio
+})
+
+snapshot["volume_analysis"] = {
+    "spot_volume_24h": snapshot.get("eth_spot", {}).get("turnover24h"),
+    "futures_volume_24h": fut_vol_24h,
+    "cumulative_delta_1h": None,       # при желании можно реализовать
+    "liquidations_24h_usd": liq_24h_usd
+}
+
+if "levels" not in snapshot:
+    snapshot["levels"] = {}
+if range_mid is not None:
+    snapshot["levels"]["range_mid"] = range_mid
+if session_hl:
+    snapshot["levels"]["session_high_low"] = session_hl
+# ===================== /END ADD =====================
+
+
 # ---------- GitHub upload ----------
 def upload_to_github(repo, path, token, content, message="auto snapshot"):
     api_url = f"https://api.github.com/repos/{repo}/contents/{path}"
