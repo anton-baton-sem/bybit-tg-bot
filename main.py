@@ -1,89 +1,93 @@
-# main.py — сохраняет рыночные снапшоты ETH/USDT и BTC/USDT с Bybit на GitHub
-# Два запуска в день: 9:00 (MODE=forecast) и 21:00 (MODE=review)
-# ENV: GITHUB_TOKEN, GITHUB_REPO, GITHUB_PATH, MODE
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+bybit snapshot → GitHub
+Собирает метрики по ETH/USDT и BTC/USDT (Bybit v5), считает TA и пушит JSON в репозиторий.
 
-import os, json, math, statistics, base64, urllib.request, urllib.parse
+ENV (Render → Environment):
+  GITHUB_TOKEN   : GitHub PAT (contents: write)
+  GITHUB_REPO    : "anton-baton-sem/bybit-tg-bot"
+  GITHUB_BRANCH  : "main"
+  GITHUB_PATH    : "snapshots"
+  MODE           : "forecast" | "review"   (по умолч. forecast)
+  TZ             : "Europe/Podgorica"
+
+Авторский стиль: без внешних зависимостей (urllib+json), аккуратные try/except, NaN→None.
+"""
+
+import os, sys, json, math, base64, time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+from urllib import request, parse, error
 
-BYBIT  = "https://api.bybit.com"
+# ------------------ Константы ------------------
+BYBIT = "https://api.bybit.com"
+UA    = "Mozilla/5.0 (compatible; RenderBot/1.0; +https://render.com)"
 
-# ---------- вспомогательные ----------
-def http_get(url, params=None, timeout=10):
+REPO   = os.getenv("GITHUB_REPO",   "anton-baton-sem/bybit-tg-bot")
+BRANCH = os.getenv("GITHUB_BRANCH", "main")
+SNPATH = os.getenv("GITHUB_PATH",   "snapshots")
+MODE   = (os.getenv("MODE") or "forecast").strip().lower()
+TZ     = os.getenv("TZ", "Europe/Podgorica")
+PAT    = os.getenv("GITHUB_TOKEN", "").strip()
+
+ETH = "ETHUSDT"
+BTC = "BTCUSDT"
+
+# ------------------ Утилиты ------------------
+def http_get(url: str, params: dict | None = None, timeout: int = 12) -> dict:
     if params:
-        url = f"{url}?{urllib.parse.urlencode(params)}"
-    headers = {'User-Agent': 'Mozilla/5.0 (compatible; RenderBot/1.0; +https://render.com)'}
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode())
-        
-def fmt(x, d=2):
-    try: return f"{x:,.{d}f}".replace(",", " ")
-    except: return str(x)
+        url = f"{url}?{parse.urlencode(params)}"
+    req = request.Request(url, headers={"User-Agent": UA})
+    with request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
 
-# ---------- bybit: spot & derivatives ----------
-def get_spot_ticker(symbol):
+def safe_float(x, default=None):
+    try:
+        v = float(x)
+        if math.isnan(v) or math.isinf(v):
+            return default
+        return v
+    except Exception:
+        return default
+
+def now_local_utc():
+    tz = ZoneInfo(TZ)
+    dt_local = datetime.now(tz)
+    dt_utc   = datetime.now(timezone.utc)
+    return dt_local, dt_utc
+
+def ymd_local():
+    return now_local_utc()[0].date().isoformat()
+
+# ------------------ Bybit spot helpers ------------------
+def get_spot_ticker(symbol: str) -> dict:
     j = http_get(f"{BYBIT}/v5/market/tickers", {"category":"spot","symbol":symbol})
-    it = j["result"]["list"][0]
+    it = (j.get("result", {}) or {}).get("list", []) or []
+    if not it:
+        return {}
+    it = it[0]
     return {
-        "last": float(it["lastPrice"]),
-        "high24h": float(it.get("highPrice24h","nan")),
-        "low24h":  float(it.get("lowPrice24h","nan")),
-        "turnover24h": float(it.get("turnover24h","nan")),
-        "pcnt24h": float(it.get("price24hPcnt","0"))*100.0
+        "last":      safe_float(it.get("lastPrice")),
+        "high24h":   safe_float(it.get("highPrice24h")),
+        "low24h":    safe_float(it.get("lowPrice24h")),
+        "turnover24h": safe_float(it.get("turnover24h")),
+        "pct24h":    safe_float(it.get("price24hPcnt"), 0.0) * 100.0 if it.get("price24hPcnt") else None
     }
 
-def get_spot_kline(symbol, interval="5", limit=288):
+def get_spot_kline(symbol: str, interval="60", limit=300):
+    # Bybit возвращает kline от НОВОГО к СТАРОМУ → разворачиваем
     j = http_get(f"{BYBIT}/v5/market/kline",
                  {"category":"spot","symbol":symbol,"interval":interval,"limit":limit})
-    out=[]
-    for row in j["result"]["list"]:
-        ts,o,h,l,c,vol,turn = row
-        out.append({"ts":int(ts),"o":float(o),"h":float(h),"l":float(l),"c":float(c),
-                    "vol":float(vol),"turnover":float(turn)})
-    out.sort(key=lambda x:x["ts"])
-    return out
+    lst = (j.get("result", {}) or {}).get("list", []) or []
+    lst = list(reversed(lst))
+    closes = [safe_float(x[4]) for x in lst if safe_float(x[4]) is not None]
+    highs  = [safe_float(x[2]) for x in lst if safe_float(x[2]) is not None]
+    lows   = [safe_float(x[3]) for x in lst if safe_float(x[3]) is not None]
+    times  = [int(x[0]) for x in lst]  # ms
+    return {"closes":closes, "highs":highs, "lows":lows, "times":times}
 
-def calc_atr(klines, period=14):
-    trs=[]; prev_c=None
-    for k in klines:
-        if prev_c is None: trs.append(k["h"]-k["l"])
-        else: trs.append(max(k["h"]-k["l"], abs(k["h"]-prev_c), abs(k["l"]-prev_c)))
-        prev_c=k["c"]
-    if len(trs)<period: return float("nan")
-    return sum(trs[-period:])/period
-
-def calc_vwap_today(klines):
-    today = datetime.utcnow().date()
-    num=den=0.0
-    for k in klines:
-        dt=datetime.fromtimestamp(k["ts"]/1000, tz=timezone.utc).date()
-        if dt==today:
-            price=k["c"]; vol_q=k["turnover"]
-            num+=price*vol_q; den+=vol_q
-    return num/den if den>0 else float("nan")
-
-def get_funding(symbol):
-    j=http_get(f"{BYBIT}/v5/market/funding/history",
-               {"category":"linear","symbol":symbol,"limit":1})
-    lst=j["result"]["list"]
-    return float(lst[0].get("fundingRate","0"))*100.0 if lst else float("nan")
-
-def get_open_interest(symbol, interval="1h"):
-    j=http_get(f"{BYBIT}/v5/market/open-interest",
-               {"category":"linear","symbol":symbol,"interval":interval,"limit":1})
-    lst=j["result"]["list"]
-    return float(lst[0].get("openInterest","nan")) if lst else float("nan")
-
-def get_orderbook_imbalance(symbol, depth=50):
-    j=http_get(f"{BYBIT}/v5/market/orderbook",
-               {"category":"spot","symbol":symbol,"limit":depth})
-    bids=j["result"]["b"]; asks=j["result"]["a"]
-    sb = sum(float(p[1]) for p in bids) if bids else 0.0
-    sa = sum(float(p[1]) for p in asks) if asks else 0.0
-    return (sb-sa)/(sb+sa)*100.0 if (sb+sa)>0 else 0.0
-
-# ===================== ADD: TA helpers (без внешних библиотек) =====================
+# ------------------ Простая TA без внешних либ ------------------
 def ema(series, period):
     if not series or len(series) < period:
         return None
@@ -105,8 +109,7 @@ def rsi_wilder(closes, period=14):
     avg_loss = sum(losses) / period
     for i in range(period + 1, len(closes)):
         ch = closes[i] - closes[i - 1]
-        gain = max(ch, 0.0)
-        loss = max(-ch, 0.0)
+        gain = max(ch, 0.0); loss = max(-ch, 0.0)
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
     if avg_loss == 0:
@@ -114,248 +117,266 @@ def rsi_wilder(closes, period=14):
     rs = avg_gain / avg_loss
     return 100.0 - (100.0 / (1.0 + rs))
 
-# ===================== ADD: Bybit доп. источники =====================
-def get_spot_kline_closes(symbol, interval="60", limit=300):
-    j = http_get(f"{BYBIT}/v5/market/kline",
-                 {"category": "spot", "symbol": symbol, "interval": interval, "limit": limit})
-    rows = j.get("result", {}).get("list", []) or []
-    # Bybit отдаёт в порядке от нового к старому → разворачиваем
-    rows = list(reversed(rows))
-    closes = [float(r[4]) for r in rows]
-    highs  = [float(r[2]) for r in rows]
-    lows   = [float(r[3]) for r in rows]
-    return closes, highs, lows
-
-def get_linear_oi(symbol):
-    try:
-        j = http_get(f"{BYBIT}/v5/market/open-interest",
-                     {"category": "linear", "symbol": symbol, "interval": "1h", "limit": "1"})
-        lst = j.get("result", {}).get("list", []) or []
-        return float(lst[-1].get("openInterest")) if lst else None
-    except Exception:
+# ------------------ Bybit derivatives helpers ------------------
+def get_funding(symbol: str) -> float | None:
+    # Funding проценты для линейных перпов
+    j = http_get(f"{BYBIT}/v5/market/tickers", {"category":"linear","symbol":symbol})
+    it = (j.get("result", {}) or {}).get("list", []) or []
+    if not it:
         return None
+    return safe_float(it[0].get("fundingRate")) * 100.0 if it[0].get("fundingRate") else None
 
-def get_linear_oi_change_24h_pct(symbol):
-    try:
-        j = http_get(f"{BYBIT}/v5/market/open-interest",
-                     {"category": "linear", "symbol": symbol, "interval": "1h", "limit": "24"})
-        lst = j.get("result", {}).get("list", []) or []
-        if len(lst) < 2:
-            return None
-        first = float(lst[0].get("openInterest", "nan"))
-        last  = float(lst[-1].get("openInterest", "nan"))
-        if not (first > 0 and (first == first) and (last == last)):
-            return None
-        return (last - first) / first * 100.0
-    except Exception:
+def get_open_interest(symbol: str) -> float | None:
+    # Последняя точка OI (linear)
+    j = http_get(f"{BYBIT}/v5/market/open-interest",
+                 {"category":"linear","symbol":symbol,"interval":"1h","limit":"1"})
+    it = (j.get("result", {}) or {}).get("list", []) or []
+    if not it:
         return None
+    return safe_float(it[-1].get("openInterest"))
 
-def get_recent_trades_ratio(symbol, limit=1000):
+def get_open_interest_change_24h_pct(symbol: str) -> float | None:
+    j = http_get(f"{BYBIT}/v5/market/open-interest",
+                 {"category":"linear","symbol":symbol,"interval":"1h","limit":"24"})
+    it = (j.get("result", {}) or {}).get("list", []) or []
+    if len(it) < 2:
+        return None
+    first = safe_float(it[0].get("openInterest"))
+    last  = safe_float(it[-1].get("openInterest"))
+    if not first or not last:
+        return None
+    return (last - first) / first * 100.0
+
+def get_recent_trades_ratio(symbol: str, limit=1000) -> float | None:
     # отношение объёма маркет-покупок к маркет-продажам за последние сделки
-    try:
-        j = http_get(f"{BYBIT}/v5/market/recent-trade",
-                     {"category": "linear", "symbol": symbol, "limit": str(limit)})
-        trades = j.get("result", {}).get("list", []) or []
-        buy_vol = sell_vol = 0.0
-        for t in trades:
-            side = (t.get("side") or "").lower()  # "Buy"/"Sell"
-            qty = float(t.get("qty", "0"))
-            if side == "buy":
-                buy_vol += qty
-            elif side == "sell":
-                sell_vol += qty
-        if buy_vol + sell_vol == 0:
-            return None
-        return buy_vol / max(sell_vol, 1e-9)
-    except Exception:
+    j = http_get(f"{BYBIT}/v5/market/recent-trade",
+                 {"category":"linear","symbol":symbol,"limit":str(limit)})
+    trades = (j.get("result", {}) or {}).get("list", []) or []
+    buy_vol = sell_vol = 0.0
+    for t in trades:
+        side = (t.get("side") or "").lower()
+        qty = safe_float(t.get("qty"), 0.0) or 0.0
+        if side == "buy":   buy_vol  += qty
+        elif side == "sell": sell_vol += qty
+    if buy_vol + sell_vol == 0:
         return None
+    return buy_vol / max(sell_vol, 1e-9)
 
-def get_futures_volume_24h(symbol):
-    try:
-        j = http_get(f"{BYBIT}/v5/market/tickers",
-                     {"category": "linear", "symbol": symbol})
-        it = (j.get("result", {}) or {}).get("list", []) or []
-        return float(it[0].get("turnover24h", "nan")) if it else None
-    except Exception:
+def get_futures_turnover_24h(symbol: str) -> float | None:
+    j = http_get(f"{BYBIT}/v5/market/tickers", {"category":"linear","symbol":symbol})
+    it = (j.get("result", {}) or {}).get("list", []) or []
+    if not it:
         return None
+    return safe_float(it[0].get("turnover24h"))
 
-def get_liquidations_24h_usd(symbol):
-    # Не у всех аккаунтов/регионов эндпоинт доступен одинаково — суммируем грубо.
+def get_liquidations_24h_usd(symbol: str) -> float | None:
+    # агрегированно по последним записям
     try:
         j = http_get(f"{BYBIT}/v5/market/liquidation",
-                     {"category": "linear", "symbol": symbol, "limit": "200"})
-        lst = j.get("result", {}).get("list", []) or []
+                     {"category":"linear","symbol":symbol,"limit":"200"})
+        lst = (j.get("result", {}) or {}).get("list", []) or []
         total = 0.0
         for x in lst:
-            qty = float(x.get("qty", "0"))
-            price = float(x.get("price", "0"))
+            qty   = safe_float(x.get("qty"), 0.0) or 0.0
+            price = safe_float(x.get("price"), 0.0) or 0.0
             total += qty * price
         return total if total > 0 else None
     except Exception:
         return None
 
-# ===================== ADD: расширение snapshot в main() =====================
-# ВСТАВЬ этот блок внутри main(), ПОСЛЕ того как у тебя уже есть:
-#  - eth = get_spot_ticker("ETHUSDT")
-#  - btc = get_spot_ticker("BTCUSDT")
-#  - snapshot = {...}  (твой базовый словарь с calc/derivs/levels)
+# ------------------ Расчёты ATR и VWAP ------------------
+def calc_atr_1d(highs, lows, closes) -> float | None:
+    # простой ATR по последнему дню (приближённо: средняя разница High-Low)
+    if not highs or not lows:
+        return None
+    return sum((h - l) for h, l in zip(highs[-24:], lows[-24:])) / min(24, len(highs))
 
-# --- TA по H1/H4 ---
-try:
-    cl1, hi1, lo1 = get_spot_kline_closes("ETHUSDT", interval="60", limit=300)  # H1 клоузы
-except Exception:
-    cl1, hi1, lo1 = [], [], []
+def calc_vwap_today(times_ms, highs, lows, closes) -> float | None:
+    # упрощённый VWAP по сегодняшним H1 свечам: (H+L+C)/3 * volume_proxy(=1)
+    if not times_ms or not closes:
+        return None
+    # выделим сегодняшние по локальной дате
+    tz = ZoneInfo(TZ)
+    today = datetime.now(tz).date()
+    v_sum = 0.0
+    pv_sum = 0.0
+    for t, h, l, c in zip(times_ms, highs, lows, closes):
+        dt = datetime.fromtimestamp(t/1000, tz)
+        if dt.date() != today:
+            continue
+        price_typ = (h + l + c) / 3.0
+        vol_proxy = 1.0  # без реального объёма: равные веса
+        pv_sum += price_typ * vol_proxy
+        v_sum  += vol_proxy
+    return (pv_sum / v_sum) if v_sum > 0 else None
 
-rsi_1h = rsi_wilder(cl1, 14) if cl1 else None
-# H4 сделаем даунсэмплом H1 (каждая 4-я свеча)
-cl4 = cl1[::4] if cl1 else []
-rsi_4h = rsi_wilder(cl4, 14) if cl4 and len(cl4) >= 15 else None
+# ------------------ GitHub: upload ------------------
+def github_put_json(repo: str, branch: str, path: str, data: dict, pat: str):
+    """
+    Создаёт/обновляет файл через GitHub Contents API.
+    """
+    api = f"https://api.github.com/repos/{repo}/contents/{path}"
+    body = json.dumps(data, ensure_ascii=False, separators=(",",":")).encode("utf-8")
+    b64  = base64.b64encode(body).decode("ascii")
 
-ema_50_1h  = ema(cl1[-200:], 50)  if cl1 and len(cl1) >= 50  else None
-ema_200_1h = ema(cl1[-400:], 200) if cl1 and len(cl1) >= 200 else None
-if ema_50_1h is not None and ema_200_1h is not None:
-    ema_cross = "bullish" if ema_50_1h > ema_200_1h else ("bearish" if ema_50_1h < ema_200_1h else "flat")
-else:
-    ema_cross = None
-
-# --- Деривативы / объёмы ---
-oi_eth = get_linear_oi("ETHUSDT")
-oi_btc = get_linear_oi("BTCUSDT")
-oi_change_24h_pct = get_linear_oi_change_24h_pct("ETHUSDT")
-taker_ratio = get_recent_trades_ratio("ETHUSDT", limit=1000)
-fut_vol_24h = get_futures_volume_24h("ETHUSDT")
-liq_24h_usd = get_liquidations_24h_usd("ETHUSDT")
-
-# --- Диапазон / сессия ---
-try:
-    hi24 = float(snapshot["eth_spot"].get("high24h")) if snapshot.get("eth_spot") else None
-    lo24 = float(snapshot["eth_spot"].get("low24h"))  if snapshot.get("eth_spot") else None
-    range_mid = ((hi24 + lo24) / 2.0) if (hi24 is not None and lo24 is not None) else None
-except Exception:
-    range_mid = None
-
-# последние ~6 H1-часов как "сессионные" экстремумы
-try:
-    session_high = max(hi1[-6:]) if hi1 else None
-    session_low  = min(lo1[-6:]) if lo1 else None
-    session_hl = [session_high, session_low] if (session_high is not None and session_low is not None) else None
-except Exception:
-    session_hl = None
-
-# --- Обновляем snapshot новыми полями ---
-snapshot.setdefault("calc", {}).update({
-    "rsi_1h": rsi_1h,
-    "rsi_4h": rsi_4h,
-    "ema_50_1h": ema_50_1h,
-    "ema_200_1h": ema_200_1h,
-    "ema_cross": ema_cross
-})
-
-snapshot.setdefault("derivs", {}).update({
-    "oi_eth": oi_eth if oi_eth is not None else snapshot["derivs"].get("oi_eth"),
-    "oi_btc": oi_btc if oi_btc is not None else snapshot["derivs"].get("oi_btc"),
-    "oi_change_24h_pct": oi_change_24h_pct,
-    "taker_buy_sell_ratio": taker_ratio
-})
-
-snapshot["volume_analysis"] = {
-    "spot_volume_24h": snapshot.get("eth_spot", {}).get("turnover24h"),
-    "futures_volume_24h": fut_vol_24h,
-    "cumulative_delta_1h": None,       # при желании можно реализовать
-    "liquidations_24h_usd": liq_24h_usd
-}
-
-if "levels" not in snapshot:
-    snapshot["levels"] = {}
-if range_mid is not None:
-    snapshot["levels"]["range_mid"] = range_mid
-if session_hl:
-    snapshot["levels"]["session_high_low"] = session_hl
-# ===================== /END ADD =====================
-
-
-# ---------- GitHub upload ----------
-def upload_to_github(repo, path, token, content, message="auto snapshot"):
-    api_url = f"https://api.github.com/repos/{repo}/contents/{path}"
-    headers = {
-        "Authorization": f"token {token}",
-        "Content-Type": "application/json"
-    }
-    # проверим, существует ли файл
-    req = urllib.request.Request(api_url, headers=headers)
+    # нужно получить sha, если файл уже существует
+    sha = None
     try:
-        with urllib.request.urlopen(req) as r:
-            resp = json.loads(r.read().decode())
-            sha = resp.get("sha")
-    except:
+        req = request.Request(f"{api}?ref={branch}", headers={"User-Agent": UA})
+        with request.urlopen(req, timeout=12) as r:
+            meta = json.loads(r.read().decode("utf-8"))
+            sha = meta.get("sha")
+    except Exception:
         sha = None
 
     payload = {
-        "message": message,
-        "content": base64.b64encode(content.encode()).decode(),
-        "branch": "main"
+        "message": f"auto snapshot {os.path.basename(path).replace('.json','')}",
+        "content": b64,
+        "branch":  branch
     }
-    if sha: payload["sha"] = sha
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(api_url, data=data, headers=headers, method="PUT")
-    with urllib.request.urlopen(req) as r:
-        print("Uploaded to GitHub:", r.status)
+    if sha:
+        payload["sha"] = sha
 
-# ---------- MAIN ----------
+    data_bytes = json.dumps(payload).encode("utf-8")
+    headers = {
+        "User-Agent": UA,
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {pat}"
+    }
+    req = request.Request(api, data=data_bytes, headers=headers, method="PUT")
+    with request.urlopen(req, timeout=15) as r:
+        _ = r.read()
+
+# ------------------ main ------------------
 def main():
-    mode = os.environ.get("MODE","forecast")  # forecast / review
-    repo = os.environ["GITHUB_REPO"]
-    path_prefix = os.environ.get("GITHUB_PATH","snapshots/")
-    token = os.environ["GITHUB_TOKEN"]
+    dt_local, dt_utc = now_local_utc()
+    today = dt_local.date().isoformat()
+    print("Running snapshot for:", today, MODE, flush=True)
 
-    # Дата и время
-    tz = ZoneInfo("Europe/Podgorica")
-    now_local = datetime.now(tz)
-    now_utc = datetime.utcnow()
-    date_tag = now_local.strftime("%Y-%m-%d")
+    # ---- spot ----
+    eth = get_spot_ticker(ETH)
+    btc = get_spot_ticker(BTC)
 
-    # --- Получаем данные ---
-    eth = get_spot_ticker("ETHUSDT")
-    btc = get_spot_ticker("BTCUSDT")
-    k5 = get_spot_kline("ETHUSDT","5",288)
-    k60 = get_spot_kline("ETHUSDT","60",48)
-    atr_d = calc_atr(k60[-24:],14) if len(k60)>=24 else calc_atr(k5,60)
-    vwap  = calc_vwap_today(k5)
-    f_eth = get_funding("ETHUSDT")
-    f_btc = get_funding("BTCUSDT")
-    oi_eth = get_open_interest("ETHUSDT","1h")
-    oi_btc = get_open_interest("BTCUSDT","1h")
-    imb = get_orderbook_imbalance("ETHUSDT",50)
+    k1 = get_spot_kline(ETH, interval="60", limit=300)
+    closes = k1["closes"]; highs = k1["highs"]; lows = k1["lows"]; times_ms = k1["times"]
 
+    atr_1d  = calc_atr_1d(highs, lows, closes)
+    vwap_td = calc_vwap_today(times_ms, highs, lows, closes)
+
+    # Небольшой суррогат дисбаланса ордербука (если нет своего стакана):
+    # используем знак последнего движения close (очень грубо). Лучше заменить на свой стакан.
+    orderbook_imbalance_pct = 0.0
+    if len(closes) >= 2:
+        diff = closes[-1] - closes[-2]
+        orderbook_imbalance_pct = (1 if diff > 0 else -1) * 1.0  # ±1% как плейсхолдер
+
+    # ---- derivatives baseline ----
+    funding_eth = get_funding(ETH)
+    funding_btc = get_funding(BTC)
+    oi_eth = get_open_interest(ETH)
+    oi_btc = get_open_interest(BTC)
+
+    # ---- базовый skeleton snapshot ----
     snapshot = {
-        "timestamp_utc": now_utc.strftime("%Y-%m-%d %H:%M:%S"),
-        "timestamp_local": now_local.strftime("%Y-%m-%d %H:%M:%S (%Z)"),
-        "mode": mode,
+        "timestamp_utc":   dt_utc.replace(tzinfo=timezone.utc).strftime("%Y-%m-%d %H:%M:%S (%Z)"),
+        "timestamp_local": dt_local.strftime("%Y-%m-%d %H:%M:%S (%Z)"),
+        "mode": MODE,
         "eth_spot": eth,
         "btc_spot": btc,
-        "calc": {"atr_1d": atr_d, "vwap_today": vwap, "orderbook_imbalance_pct": imb},
+        "calc": {
+            "atr_1d": atr_1d,
+            "vwap_today": vwap_td,
+            "orderbook_imbalance_pct": orderbook_imbalance_pct
+        },
         "derivs": {
-            "funding_eth_pct": f_eth,
-            "funding_btc_pct": f_btc,
+            "funding_eth_pct": funding_eth,
+            "funding_btc_pct": funding_btc,
             "oi_eth": oi_eth,
             "oi_btc": oi_btc
         },
-        "levels": {"support": [3780,3700], "resistance": [3950,4050]}
+        "levels": {
+            # заполни реальные уровни своей логикой/скриптом; оставляю плейсхолдеры
+            "support": [3780, 3700],
+            "resistance": [3950, 4050]
+        }
     }
 
-    filename = f"{date_tag}_{mode}.json"
-    local_path = f"/tmp/{filename}"
-    with open(local_path, "w") as f:
-        json.dump(snapshot, f, indent=2)
-    print("Snapshot saved locally:", local_path)
+    # ---- ДОБАВЛЯЕМ расширенные метрики (RSI/EMA/OI change/taker/объёмы/ликвидации) ----
+    # TA H1/H4
+    rsi_1h  = rsi_wilder(closes, 14) if closes else None
+    cl4     = closes[::4] if closes else []
+    rsi_4h  = rsi_wilder(cl4, 14) if cl4 and len(cl4) >= 15 else None
+    ema50   = ema(closes[-200:], 50)   if closes and len(closes) >= 50  else None
+    ema200  = ema(closes[-400:], 200)  if closes and len(closes) >= 200 else None
+    ema_x   = None
+    if ema50 is not None and ema200 is not None:
+        ema_x = "bullish" if ema50 > ema200 else ("bearish" if ema50 < ema200 else "flat")
 
-    # --- Загрузка в GitHub ---
-    remote_path = f"{path_prefix}{filename}"
-    with open(local_path, "r") as f:
-        content = f.read()
-    upload_to_github(repo, remote_path, token, content, f"auto snapshot {mode} {date_tag}")
+    # деривы/объёмы
+    oi_change_24h_pct = get_open_interest_change_24h_pct(ETH)
+    taker_ratio       = get_recent_trades_ratio(ETH, limit=1000)
+    fut_turnover_24h  = get_futures_turnover_24h(ETH)
+    liq_24h_usd       = get_liquidations_24h_usd(ETH)
 
-    print("Done", mode, date_tag)
+    # диапазон/сессия
+    try:
+        hi24 = safe_float(eth.get("high24h"))
+        lo24 = safe_float(eth.get("low24h"))
+        range_mid = ((hi24 + lo24) / 2.0) if (hi24 is not None and lo24 is not None) else None
+    except Exception:
+        range_mid = None
+
+    session_h = max(highs[-6:]) if highs else None
+    session_l = min(lows[-6:])  if lows else None
+    session_hl = [session_h, session_l] if (session_h is not None and session_l is not None) else None
+
+    # вклеиваем в snapshot
+    snapshot["calc"].update({
+        "rsi_1h": rsi_1h,
+        "rsi_4h": rsi_4h,
+        "ema_50_1h": ema50,
+        "ema_200_1h": ema200,
+        "ema_cross": ema_x
+    })
+    snapshot["derivs"].update({
+        "oi_change_24h_pct": oi_change_24h_pct,
+        "taker_buy_sell_ratio": taker_ratio
+    })
+    snapshot["volume_analysis"] = {
+        "spot_volume_24h": eth.get("turnover24h") if isinstance(eth, dict) else None,
+        "futures_volume_24h": fut_turnover_24h,
+        "cumulative_delta_1h": None,     # можно реализовать отдельно
+        "liquidations_24h_usd": liq_24h_usd
+    }
+    if range_mid is not None:
+        snapshot["levels"]["range_mid"] = range_mid
+    if session_hl:
+        snapshot["levels"]["session_high_low"] = session_hl
+
+    # ---- сохраняем локально (на всякий случай) ----
+    fname = f"{today}_{MODE}.json"
+    local_path = f"/tmp/{fname}"
+    with open(local_path, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, ensure_ascii=False, separators=(",",":"))
+    print("Snapshot saved locally:", local_path, flush=True)
+
+    # ---- загружаем в GitHub ----
+    if not PAT:
+        print("WARNING: GITHUB_TOKEN is empty — upload skipped", file=sys.stderr)
+        return
+
+    repo_path = f"{SNPATH}/{fname}"
+    github_put_json(REPO, BRANCH, repo_path, snapshot, PAT)
+    print("Uploaded to GitHub:", f"{REPO}/{repo_path}", flush=True)
+    print("Done", today, MODE, flush=True)
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except error.HTTPError as e:
+        print("HTTPError:", e.code, e.reason, file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print("Error:", repr(e), file=sys.stderr)
+        sys.exit(1)
