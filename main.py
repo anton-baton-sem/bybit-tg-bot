@@ -216,10 +216,10 @@ def github_put_json(repo: str, branch: str, path: str, data: dict, pat: str):
     Создаёт/обновляет файл через GitHub Contents API.
     """
     api = f"https://api.github.com/repos/{repo}/contents/{path}"
-    body = json.dumps(data, ensure_ascii=False, separators=(",",":")).encode("utf-8")
+    body = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     b64  = base64.b64encode(body).decode("ascii")
 
-    # нужно получить sha, если файл уже существует
+    # Получаем sha, если файл существует
     sha = None
     try:
         req = request.Request(f"{api}?ref={branch}", headers={"User-Agent": UA})
@@ -232,7 +232,8 @@ def github_put_json(repo: str, branch: str, path: str, data: dict, pat: str):
     payload = {
         "message": f"auto snapshot {os.path.basename(path).replace('.json','')}",
         "content": b64,
-        "branch":  branch
+        "encoding": "base64",   # 🔥 обязательно
+        "branch": branch
     }
     if sha:
         payload["sha"] = sha
@@ -243,9 +244,11 @@ def github_put_json(repo: str, branch: str, path: str, data: dict, pat: str):
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {pat}"
     }
+
     req = request.Request(api, data=data_bytes, headers=headers, method="PUT")
-    with request.urlopen(req, timeout=15) as r:
-        _ = r.read()
+    with request.urlopen(req, timeout=20) as r:
+        resp = json.loads(r.read().decode("utf-8"))
+        print("GitHub upload ok:", resp.get("content", {}).get("path"))
 
 # ------------------ main ------------------
 def main():
