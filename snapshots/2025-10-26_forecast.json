@@ -1,0 +1,40 @@
+{
+  "timestamp_utc": "2025-10-26 07:00:36",
+  "timestamp_local": "2025-10-26 08:00:36 (CET)",
+  "mode": "forecast",
+  "eth_spot": {
+    "last": 3945.06,
+    "high24h": 3969.15,
+    "low24h": 3919.0,
+    "turnover24h": 159023686.5852939,
+    "pcnt24h": 0.42
+  },
+  "btc_spot": {
+    "last": 111636.2,
+    "high24h": 111958.2,
+    "low24h": 111162.5,
+    "turnover24h": 374195793.1884423,
+    "pcnt24h": 0.25
+  },
+  "calc": {
+    "atr_1d": 16.516428571428605,
+    "vwap_today": 3938.6762844338546,
+    "orderbook_imbalance_pct": -1.7920305873260927
+  },
+  "derivs": {
+    "funding_eth_pct": 0.01,
+    "funding_btc_pct": 0.009909,
+    "oi_eth": NaN,
+    "oi_btc": NaN
+  },
+  "levels": {
+    "support": [
+      3780,
+      3700
+    ],
+    "resistance": [
+      3950,
+      4050
+    ]
+  }
+}
