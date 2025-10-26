@@ -214,42 +214,63 @@ def calc_vwap_today(times_ms, highs, lows, closes) -> float | None:
 def github_put_json(repo: str, branch: str, path: str, data: dict, pat: str):
     """
     Создаёт/обновляет файл через GitHub Contents API.
+    Требует PAT с правом contents:write (или repo).
     """
-    api = f"https://api.github.com/repos/{repo}/contents/{path}"
-    body = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    b64  = base64.b64encode(body).decode("ascii")
+    api_base = f"https://api.github.com/repos/{repo}/contents/{path}"
+    headers_auth = {
+        "User-Agent": UA,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Authorization": f"Bearer {pat}",
+    }
 
-    # Получаем sha, если файл существует
+    # 1) Узнаём текущий sha (если файл уже существует)
     sha = None
     try:
-        req = request.Request(f"{api}?ref={branch}", headers={"User-Agent": UA})
+        req = request.Request(f"{api_base}?ref={branch}", headers=headers_auth)
         with request.urlopen(req, timeout=12) as r:
             meta = json.loads(r.read().decode("utf-8"))
             sha = meta.get("sha")
-    except Exception:
-        sha = None
+    except error.HTTPError as e:
+        # 404 — это нормально (файл создаём впервые); остальные покажем
+        if e.code != 404:
+            body = e.read().decode("utf-8", "ignore")
+            print(f"[GitHub GET sha] HTTP {e.code}: {body}", file=sys.stderr)
+    except Exception as e:
+        print(f"[GitHub GET sha] {repr(e)}", file=sys.stderr)
 
+    # 2) Формируем тело PUT
+    body_bytes = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    content_b64 = base64.b64encode(body_bytes).decode("ascii")
     payload = {
         "message": f"auto snapshot {os.path.basename(path).replace('.json','')}",
-        "content": b64,
-        "encoding": "base64",   # 🔥 обязательно
-        "branch": branch
+        "content": content_b64,
+        "encoding": "base64",
+        "branch": branch,
     }
     if sha:
         payload["sha"] = sha
 
     data_bytes = json.dumps(payload).encode("utf-8")
-    headers = {
-        "User-Agent": UA,
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {pat}"
-    }
+    headers_put = dict(headers_auth)
+    headers_put["Content-Type"] = "application/json; charset=utf-8"
 
-    req = request.Request(api, data=data_bytes, headers=headers, method="PUT")
-    with request.urlopen(req, timeout=20) as r:
-        resp = json.loads(r.read().decode("utf-8"))
-        print("GitHub upload ok:", resp.get("content", {}).get("path"))
+    # 3) Отправляем PUT
+    try:
+        req = request.Request(api_base, data=data_bytes, headers=headers_put, method="PUT")
+        with request.urlopen(req, timeout=20) as r:
+            resp = json.loads(r.read().decode("utf-8"))
+            path_ok = resp.get("content", {}).get("path")
+            print("GitHub upload ok:", path_ok)
+    except error.HTTPError as e:
+        body = e.read().decode("utf-8", "ignore")
+        print(f"[GitHub PUT] HTTP {e.code}: {body}", file=sys.stderr)
+        raise
+    except Exception as e:
+        print(f"[GitHub PUT] {repr(e)}", file=sys.stderr)
+        raise
 
+  
 # ------------------ main ------------------
 def main():
     dt_local, dt_utc = now_local_utc()
