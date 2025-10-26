@@ -117,6 +117,134 @@ def rsi_wilder(closes, period=14):
     rs = avg_gain / avg_loss
     return 100.0 - (100.0 / (1.0 + rs))
 
+# ======== EXTRA HELPERS FOR SNAPSHOT ENHANCEMENT ========
+
+def get_spot_ticker_full(symbol: str) -> dict:
+    j = http_get(f"{BYBIT}/v5/market/tickers", {"category":"spot","symbol":symbol})
+    it = (j.get("result", {}) or {}).get("list", []) or []
+    return it[0] if it else {}
+
+def get_orderbook_stats(symbol: str, depth=50):
+    """
+    Возвращает (imbalance_pct, spread_pct, bid_sum, ask_sum).
+    """
+    try:
+        j = http_get(f"{BYBIT}/v5/market/orderbook",
+                     {"category":"spot","symbol":symbol,"limit":str(depth)})
+        ob = (j.get("result", {}) or {})
+        bids = ob.get("b", []) or []  # [[price, size], ...]
+        asks = ob.get("a", []) or []
+        bid_sum = sum(safe_float(x[1],0.0) for x in bids)
+        ask_sum = sum(safe_float(x[1],0.0) for x in asks)
+        imb = None
+        if bid_sum + ask_sum > 0:
+            imb = (bid_sum - ask_sum) / (bid_sum + ask_sum) * 100.0
+        # спред
+        best_bid = safe_float(bids[0][0]) if bids else None
+        best_ask = safe_float(asks[0][0]) if asks else None
+        spread_pct = None
+        if best_bid and best_ask and best_ask > 0 and best_bid > 0:
+            mid = 0.5*(best_bid+best_ask)
+            spread_pct = (best_ask - best_bid) / mid * 100.0
+        return imb, spread_pct, bid_sum, ask_sum
+    except Exception:
+        return None, None, None, None
+
+def get_recent_trades_delta(symbol: str, limit=1000):
+    """
+    Приблизительная дельта по последним трейдам: сумма signed notional = qty*price*(+1/-1).
+    Возвращает (delta_notional, taker_buy_sell_ratio).
+    """
+    try:
+        j = http_get(f"{BYBIT}/v5/market/recent-trade",
+                     {"category":"linear","symbol":symbol,"limit":str(limit)})
+        trades = (j.get("result", {}) or {}).get("list", []) or []
+        buy_n, sell_n = 0.0, 0.0
+        for t in trades:
+            side  = (t.get("side") or "").lower()
+            qty   = safe_float(t.get("qty"),0.0) or 0.0
+            price = safe_float(t.get("price"),0.0) or 0.0
+            notional = qty*price
+            if side == "buy":  buy_n  += notional
+            elif side == "sell": sell_n += notional
+        total = buy_n + sell_n
+        delta = (buy_n - sell_n)
+        ratio = (buy_n / max(sell_n,1e-9)) if total>0 else None
+        return delta, ratio
+    except Exception:
+        return None, None
+
+def get_liquidations_split_24h(symbol: str):
+    """
+    Возвращает (liq_buy_usd, liq_sell_usd) — грубая оценка по последним записям.
+    """
+    try:
+        j = http_get(f"{BYBIT}/v5/market/liquidation",
+                     {"category":"linear","symbol":symbol,"limit":"200"})
+        lst = (j.get("result", {}) or {}).get("list", []) or []
+        lb = ls = 0.0
+        for x in lst:
+            side = (x.get("side") or "").lower()  # "Buy"/"Sell" — кто ликвидирован
+            qty  = safe_float(x.get("qty"),0.0) or 0.0
+            px   = safe_float(x.get("price"),0.0) or 0.0
+            usd  = qty*px
+            if side == "buy":  lb += usd
+            elif side == "sell": ls += usd
+        return (lb or None), (ls or None)
+    except Exception:
+        return None, None
+
+# ---- TA: EMA/RSI/MACD на 1H (и RSI 4H даунсэмплом) ----
+def ema_series(series, period):
+    if len(series) < period:
+        return None
+    k = 2/(period+1)
+    e = series[0]
+    for x in series[1:]:
+        e = x*k + e*(1-k)
+    return e
+
+def macd_hist(series, fast=12, slow=26, signal=9):
+    if len(series) < slow + signal:
+        return None
+    # «наивный» MACD: EMA12 - EMA26, затем EMA по разнице → гистограмма
+    # Для простоты считаем конечные значения
+    # (хватает для снапшота/аналитики, не для торговли тиками)
+    ema_fast  = ema_series(series[-(slow+signal+50):], fast)
+    ema_slow  = ema_series(series[-(slow+signal+50):], slow)
+    if ema_fast is None or ema_slow is None:
+        return None
+    macd_line = ema_fast - ema_slow
+    # сигнал: ещё одна EMA по raveled ряду; для простоты берём несколько последних
+    tmp = series[-(slow+signal+50):]
+    macd_vals = []
+    e_fast = tmp[0]; e_slow = tmp[0]
+    kf, ks = 2/(fast+1), 2/(slow+1)
+    for v in tmp[1:]:
+        e_fast = v*kf + e_fast*(1-kf)
+        e_slow = v*ks + e_slow*(1-ks)
+        macd_vals.append(e_fast - e_slow)
+    signal_line = ema_series(macd_vals, signal)
+    if signal_line is None:
+        return None
+    return macd_vals[-1] - signal_line
+
+def market_session_tag(dt_local):
+    h = dt_local.hour
+    # приблизительно: Азия 00–07, Европа 07–14, США 14–21 (локальная TZ)
+    if 0 <= h < 7:   return "ASIA"
+    if 7 <= h < 14:  return "EU"
+    if 14 <= h < 21: return "US"
+    return "OFF"
+
+def liquidity_tag_from_spread(spread_pct):
+    if spread_pct is None: return "unknown"
+    if spread_pct < 0.01:  return "high"
+    if spread_pct < 0.05:  return "normal"
+    return "thin"
+
+
+
 # ------------------ Bybit derivatives helpers ------------------
 def get_funding(symbol: str) -> float | None:
     # Funding проценты для линейных перпов
@@ -377,6 +505,77 @@ def main():
     if session_hl:
         snapshot["levels"]["session_high_low"] = session_hl
 
+      # === ДОПОЛНИТЕЛЬНЫЕ ПОЛЯ ДЛЯ ПРОГНОЗА/АНАЛИЗА ===
+
+    # 1) spot: volume24h + стакан (imbalance, spread)
+    tkr_full = get_spot_ticker_full(ETH)
+    spot_vol_24h = safe_float(tkr_full.get("volume24h"))
+    ob_imb_pct, spread_pct, bid_sum, ask_sum = get_orderbook_stats(ETH, depth=50)
+
+    # 2) delta и taker ratio по последним трейдам (linear ETHUSDT perp)
+    delta_notional, taker_ratio = get_recent_trades_delta(ETH, limit=1000)
+
+    # 3) тех. структура по H1/H4
+    kl = get_spot_kline(ETH, interval="60", limit=300)
+    cl = kl["closes"]; hi = kl["highs"]; lo = kl["lows"]
+    rsi_1 = rsi_wilder(cl, 14) if cl else None
+    cl4 = cl[::4] if cl else []
+    rsi_4 = rsi_wilder(cl4, 14) if (cl4 and len(cl4) >= 15) else None
+    ema20  = ema_series(cl[-80:], 20)  if len(cl) >= 20  else None
+    ema50  = ema_series(cl[-200:], 50) if len(cl) >= 50  else None
+    ema200 = ema_series(cl[-400:], 200)if len(cl) >= 200 else None
+    ema_cross = None
+    if ema50 is not None and ema200 is not None:
+        ema_cross = "bullish" if ema50 > ema200 else ("bearish" if ema50 < ema200 else "flat")
+    macd_h = macd_hist(cl) if cl else None
+
+    # 4) деривативы расширенные
+    oi_change_24h_pct = get_open_interest_change_24h_pct(ETH)
+    liq_buy_24h, liq_sell_24h = get_liquidations_split_24h(ETH)
+
+    # 5) мета-теги
+    dt_local, _ = now_local_utc()
+    session  = market_session_tag(dt_local)
+    liq_tag  = liquidity_tag_from_spread(spread_pct)
+
+    # ---- ВКЛЕИВАЕМ В SNAPSHOT ----
+    # spot / volume / orderbook
+    snapshot.setdefault("calc", {}).update({
+        "orderbook_imbalance_pct": ob_imb_pct if ob_imb_pct is not None else snapshot["calc"].get("orderbook_imbalance_pct"),
+        "spread_pct": spread_pct
+    })
+    snapshot.setdefault("volume_analysis", {})
+    snapshot["volume_analysis"].update({
+        "spot_volume_24h": spot_vol_24h if spot_vol_24h is not None else snapshot["volume_analysis"].get("spot_volume_24h"),
+        "futures_volume_24h": snapshot["volume_analysis"].get("futures_volume_24h"),  # уже могло быть
+        "cumulative_delta_1h": delta_notional
+    })
+
+    # tech
+    snapshot["calc"].update({
+        "rsi_1h": rsi_1,
+        "rsi_4h": rsi_4,
+        "ema_20_1h": ema20,
+        "ema_50_1h": ema50,
+        "ema_200_1h": ema200,
+        "ema_cross": ema_cross,
+        "macd_hist_1h": macd_h
+    })
+
+    # derivs
+    snapshot.setdefault("derivs", {}).update({
+        "taker_buy_sell_ratio": taker_ratio if taker_ratio is not None else snapshot["derivs"].get("taker_buy_sell_ratio"),
+        "oi_change_24h_pct": oi_change_24h_pct if oi_change_24h_pct is not None else snapshot["derivs"].get("oi_change_24h_pct"),
+        "liquidations_buy_24h_usd": liq_buy_24h,
+        "liquidations_sell_24h_usd": liq_sell_24h
+    })
+
+    # meta
+    snapshot["meta"] = {
+        "market_session": session,
+        "liquidity_tag": liq_tag
+    }
+  
     # ---- сохраняем локально (на всякий случай) ----
     fname = f"{today}_{MODE}.json"
     local_path = f"/tmp/{fname}"
