@@ -97,6 +97,7 @@ def today_snapshot(type: str):
     if type not in ("forecast", "review"):
         raise HTTPException(400, "type must be forecast|review")
     date = datetime.now(TZ).date().isoformat()
+    print(f"[{datetime.now(TZ)}] /today called with type={type}")
     data = fetch_snapshot(date, type)
     return Response(
         content=json.dumps(data, ensure_ascii=False),
