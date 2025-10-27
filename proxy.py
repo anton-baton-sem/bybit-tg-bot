@@ -78,3 +78,33 @@ def snapshot(
         media_type="application/json",
         headers={"Cache-Control":"no-store"}
     )
+    
+    # ----------------------------------------------------
+# Новый блок: быстрый доступ к "сегодняшнему" снапшоту
+# ----------------------------------------------------
+from zoneinfo import ZoneInfo
+from datetime import datetime
+
+TZ = ZoneInfo("Europe/Podgorica")
+
+@app.get("/today")
+def today_snapshot(type: str):
+    """
+    Возвращает актуальный снапшот за сегодняшний день
+    по часовому поясу Europe/Podgorica.
+    Пример: /today?type=forecast
+    """
+    if type not in ("forecast", "review"):
+        raise HTTPException(400, "type must be forecast|review")
+    date = datetime.now(TZ).date().isoformat()
+    data = fetch_snapshot(date, type)
+    return Response(
+        content=json.dumps(data, ensure_ascii=False),
+        media_type="application/json",
+        headers={"Cache-Control": "no-store"}
+    )
+
+@app.get("/healthz")
+def health_check():
+    """Проверка состояния прокси."""
+    return {"ok": True, "time": datetime.now(TZ).isoformat()}
