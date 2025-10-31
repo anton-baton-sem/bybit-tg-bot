@@ -1,0 +1,62 @@
+{
+  "timestamp_utc": "2025-10-31T08:01:58.133891",
+  "timestamp_local": "2025-10-31T09:01:58.133902+01:00",
+  "mode": "forecast",
+  "calc": {
+    "atr_1d": 16.5,
+    "vwap_today": 4135.2,
+    "orderbook_imbalance_pct": -1.8,
+    "rsi_1h": 52.4,
+    "rsi_4h": 58.1,
+    "ema_20_1h": 4120.5,
+    "ema_50_1h": 4102.3,
+    "ema_200_1h": 4045.0,
+    "ema_cross": "bullish",
+    "macd_hist_1h": -0.12
+  },
+  "eth_spot": 3830.81,
+  "meta": {
+    "eth_spot_source": "bybit_spot_lastPrice",
+    "eth_spot_time_ms": 1761897718724,
+    "eth_spot_ref_close": 3830.81,
+    "eth_spot_ref_time_ms": 1761897660000,
+    "tz_local": "Europe/Podgorica",
+    "snapshot_date_local": "2025-10-31",
+    "btc_spot_source": "bybit_spot_lastPrice",
+    "btc_spot_time_ms": 1761897719400,
+    "btc_spot_ref_close": 109492.9,
+    "btc_spot_ref_time_ms": 1761897660000
+  },
+  "btc_spot": 109492.9,
+  "derivs": {
+    "funding_eth_pct": 0.009,
+    "funding_btc_pct": 0.011,
+    "oi_eth": 3.42,
+    "oi_btc": 5.12,
+    "oi_change_24h_pct": 0.8,
+    "taker_buy_sell_ratio": 1.04,
+    "liquidations_buy_24h_usd": 3100000.0,
+    "liquidations_sell_24h_usd": 2800000.0
+  },
+  "volume_analysis": {
+    "spot_volume_24h": 531000000,
+    "futures_volume_24h": 1240000000,
+    "cumulative_delta_1h": -3800000,
+    "liquidations_24h_usd": 5900000.0
+  },
+  "levels": {
+    "support": [
+      4050,
+      3970
+    ],
+    "resistance": [
+      4250,
+      4320
+    ],
+    "range_mid": 4140,
+    "session_high_low": [
+      4046,
+      4253
+    ]
+  }
+}
