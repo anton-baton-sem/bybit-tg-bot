@@ -17,3 +17,4 @@
 | 2025-11-06 | [forecast](snapshots/2025-11-06_forecast.json) | [review](snapshots/2025-11-06_review.json) |  |  | 0.009 /  | 3.42 /  | 16.5 |  | S: 4050/3970 • R: 4250/4320 |
 | 2025-11-07 | [forecast](snapshots/2025-11-07_forecast.json) | [review](snapshots/2025-11-07_review.json) |  |  | 0.009 /  | 3.42 /  | 16.5 |  | S: 4050/3970 • R: 4250/4320 |
 | 2025-11-08 | [forecast](snapshots/2025-11-08_forecast.json) | [review](snapshots/2025-11-08_review.json) |  |  | 0.009 /  | 3.42 /  | 16.5 |  | S: 4050/3970 • R: 4250/4320 |
+| 2025-11-09 | [forecast](snapshots/2025-11-09_forecast.json) | [review](snapshots/2025-11-09_review.json) |  |  | 0.009 /  | 3.42 /  | 16.5 |  | S: 4050/3970 • R: 4250/4320 |
