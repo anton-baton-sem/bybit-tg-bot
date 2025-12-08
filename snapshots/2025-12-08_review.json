@@ -1,0 +1,54 @@
+{
+  "timestamp_utc": "2025-12-08T20:01:42.596096",
+  "timestamp_local": "2025-12-08T21:01:42.596106+01:00",
+  "mode": "review",
+  "session": {
+    "start_local_iso": "2025-12-08T00:00:00+01:00",
+    "end_local_iso": "2025-12-08T21:01:42.350661+01:00"
+  },
+  "actual": {
+    "high": 3180.59,
+    "low": 3025.19,
+    "close": 3038.88,
+    "vwap_approx": 3120.41,
+    "volume_base_sum": 131658.86672000005,
+    "turnover_quote_sum": 410829988.94357824
+  },
+  "compare": {
+    "levels_forecast": {
+      "support": [
+        4050,
+        3970
+      ],
+      "resistance": [
+        4250,
+        4320
+      ],
+      "range_mid": 4140,
+      "session_high_low": [
+        4046,
+        4253
+      ]
+    },
+    "touched_support": true,
+    "touched_resistance": false,
+    "inside_range": false,
+    "bias": "bearish"
+  },
+  "forecast_ref": {
+    "eth_spot_at_forecast": 3130.95,
+    "btc_spot_at_forecast": 91499.8,
+    "calc_at_forecast": {
+      "atr_1d": 16.5,
+      "vwap_today": 4135.2,
+      "orderbook_imbalance_pct": -1.8,
+      "rsi_1h": 52.4,
+      "rsi_4h": 58.1,
+      "ema_20_1h": 4120.5,
+      "ema_50_1h": 4102.3,
+      "ema_200_1h": 4045.0,
+      "ema_cross": "bullish",
+      "macd_hist_1h": -0.12
+    }
+  }
+}
